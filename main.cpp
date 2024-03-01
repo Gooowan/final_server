@@ -5,11 +5,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/types.h>
-#include <dirent.h>
-#include <sstream>
 #include <vector>
-#include <fstream>
-#include <sys/stat.h>
 #include <thread>
 #include <mutex>
 
@@ -32,6 +28,7 @@ private:
     vector<BoardState> board;
     vector<int> clients;
     int turn = 0;
+    bool gameover = false;
 
 
     enum class GameStatus {
@@ -42,7 +39,7 @@ private:
     };
 
     GameStatus checkStatus() {
-//        lock_guard<mutex> lock(m);
+        lock_guard<mutex> lock(m);
         for (int i = 0; i < 3; ++i) {
             if (board[3*i] == board[3*i + 1] && board[3*i] == board[3*i + 2]) {
                 if (board[3*i] == BoardState::X) return GameStatus::X_WINS;
@@ -77,6 +74,7 @@ private:
     void checkwinner(){
         GameStatus gameStatus = checkStatus();
         if (gameStatus == GameStatus::X_WINS || gameStatus == GameStatus::O_WINS || gameStatus == GameStatus::DRAW) {
+            gameover = true;
             string message;
             switch (gameStatus) {
                 case GameStatus::X_WINS:
@@ -91,18 +89,18 @@ private:
                 default:
                     break;
             }
-//            lock_guard<mutex> lock2(m);
+            lock_guard<mutex> lock2(m);
             for (int client : clients) {
                 send(client, message.c_str(), message.size(), 0);
-                send(client, "QUIT", 4, 0);
-//                close(client);
+//                send(client, "QUIT", 4, 0);
+                close(client);
             }
             clients.clear();
         }
     }
 
     void createBoard(){
-//        lock_guard<mutex> lock(m);
+        lock_guard<mutex> lock(m);
         board.resize(9);
         for (int i = 0; i < 9; i++) {
             board[i] = BoardState::EMPTY;
@@ -134,26 +132,27 @@ private:
 
 
     void updateboard(int clientSocket) {
-//        lock_guard<mutex> lock(m);
         string boardState;
-        for (int i = 0; i < 9; i++) {
-            switch (board[i]) {
-                case BoardState::X:
-                    boardState += "X    ";
-                    break;
-                case BoardState::O:
-                    boardState += "O    ";
-                    break;
-                default:
-                    boardState += "*    ";
-                    break;
-            }
-            cout << i % 3;
-            if (i % 3 == 2) {
-                boardState += "\n\n";
+        {
+            lock_guard<mutex> lock(m);
+            for (int i = 0; i < 9; i++) {
+                switch (board[i]) {
+                    case BoardState::X:
+                        boardState += "X    ";
+                        break;
+                    case BoardState::O:
+                        boardState += "O    ";
+                        break;
+                    default:
+                        boardState += "*    ";
+                        break;
+                }
+                cout << i % 3;
+                if (i % 3 == 2) {
+                    boardState += "\n\n";
+                }
             }
         }
-//        lock_guard<mutex> lock2(m);
         for (int client : clients) {
             send(client, boardState.c_str(), boardState.size(), 0);
         }
@@ -179,15 +178,12 @@ private:
         sockaddr_in clientAddr{};
         socklen_t clientAddrLen = sizeof(clientAddr);
 
-//        lock_guard<mutex> lock2(m);
         int clientSocket = accept(serverSocket, reinterpret_cast<struct sockaddr*>(&clientAddr), &clientAddrLen);
         if (clientSocket == -1) {
             perror("Accept failed");
             return -1;
         }
-//        m.lock();
         std::cout << "Accepted connection from " << inet_ntoa(clientAddr.sin_addr) << std::endl;
-//        m.unlock();
         return clientSocket;
     }
 
@@ -207,7 +203,7 @@ private:
         if (bufferSTR == "START"){
             string message = "Welcome";
             send(clientSocket, message.c_str(), message.size(), 0);
-            while (true) {
+            while (!gameover) {
                 memset(buffer, 0, sizeof(buffer));
                 bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
                 if (bytesReceived <= 0) {
@@ -217,7 +213,7 @@ private:
                 string bufferStr(buffer);
 
                 if (bufferStr == "QUIT") {
-                    string message = "QUIT";
+                    message = "QUIT";
                     send(clientSocket, message.c_str(), message.size(), 0);
                     break;
                 } else if (bufferStr.find("MOVE") == 0){
@@ -234,6 +230,7 @@ private:
                     }
                 }
             }
+            cout << "Closing connection with client" << endl;
             close(clientSocket);
         } else {
             string message = "Invalid command";
@@ -256,14 +253,13 @@ public:
     }
 
     ~Server() {
+        cout << "Closing server socket" << endl;
         close(serverSocket);
     }
 
     void disconnect() {
         close(serverSocket);
-//        m.lock();
         std::cout << "Server disconnected" << std::endl;
-//        m.unlock();
     }
 
     void start() {
@@ -272,20 +268,15 @@ public:
 
 
         while (true) {
-            int clientSocket = acceptClient();
-
-            if (clientSocket == -1) {
-                break;
-            }
             if  (clientThreads.size() >= 2){
-//                m.lock();
                 cout << "Too many gamers" << endl;
-//                m.unlock();
-                close(clientSocket);
                 continue;
             } else {
+                int clientSocket = acceptClient();
 
-//                lock_guard<mutex> lock2(m);
+                if (clientSocket == -1) {
+                    break;
+                }
                 clients.push_back(clientSocket);
                 clientThreads.emplace_back([this, clientSocket](){ handleClient(clientSocket); });
                 clientThreads.erase(
